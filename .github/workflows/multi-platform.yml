@@ -1,119 +1,58 @@
-I'll help you find a solution for this failing job. Let me start by retrieving the job logs.Now let me examine the relevant source files to understand the issue:## Problem Analysis
+name: Build Geode Mod
 
-The build is failing due to incompatibilities between your custom event system (`IVSettingEvent`) and the Geode SDK's event system. The compiler errors reveal:
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
 
-1. **`IVSettingEvent` lacks a `post()` method** — Custom events in Geode need to inherit from `geode::GlobalEvent` to have this functionality
-2. **Missing `EventFilter` and `EventListener` templates** — These aren't available in the `geode` namespace for your custom event
-3. **`SettingChangedFilterV3` API mismatch** — The macro is trying to use it directly, but it's not being recognized
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - name: Windows
+          os: windows-latest
 
-## Solution
+        - name: macOS
+          os: macos-latest
 
-Replace your custom event system with Geode's built-in `GlobalEvent`. Here's the fix:
+        - name: Android32
+          os: ubuntu-latest
+          target: Android32
 
-### Update `src/IVEvent.hpp`:
+        - name: Android64
+          os: ubuntu-latest
+          target: Android64
 
-```c++
-#pragma once
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
 
-GEODE_NS_IV_BEGIN
+    steps:
+      - uses: actions/checkout@v4
 
-enum class SettingEventType {
-    Color,
-    KeyAppearance,
-    RefreshView,
-};
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          export-pdb: true
+          build-config: RelWithDebInfo
+          bindings: geode-sdk/bindings
+          bindings-ref: main
+          combine: true
+          target: ${{ matrix.config.target }}
 
-class IVSettingEvent : public geode::GlobalEvent<IVSettingEvent, SettingEventType> {
-public:
-    IVSettingEvent(SettingEventType type) : m_type(type) {}
-    SettingEventType getType() const noexcept { return m_type; }
-    
-protected:
-    SettingEventType m_type;
-};
+  package:
+    name: Package builds
+    runs-on: ubuntu-latest
+    needs: ['build']
 
-using IVSettingFilter = geode::EventFilter<IVSettingEvent>;
+    steps:
+      - uses: geode-sdk/build-geode-mod/combine@main
+        id: build
 
-GEODE_NS_IV_END
-```
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Build Output
+          path: ${{ steps.build.outputs.build-output }}
 
-### Update `src/class/IVManager.hpp`:
-
-```c++
-#pragma once
-#include "IVLevelSettings.hpp"
-#include <Geode/loader/SettingV3.hpp>
-#include "../IVEvent.hpp"
-
-GEODE_NS_IV_BEGIN
-
-using RGBASettingFilter = geode::SettingChangedFilterV3<cocos2d::ccColor4B>;
-using RGBASettingListener = geode::EventListener<RGBASettingFilter>;
-using IVSettingListener = geode::EventListener<IVSettingFilter>;
-
-class IVManager {
-public:
-    IVManager();
-    static IVManager& get();
-    static NodeTransform getDefaultP1Transform();
-    static NodeTransform getDefaultP2Transform();
-    LevelSettings& getLevelSettings(LevelSettingsType type) noexcept;
-public:
-    bool m_isInSetting;
-    cocos2d::ccColor4B m_backgroundPressColor;
-    cocos2d::ccColor4B m_backgroundReleaseColor;
-    cocos2d::ccColor4B m_outlinePressColor;
-    cocos2d::ccColor4B m_outlineReleaseColor;
-    cocos2d::ccColor4B m_textPressColor;
-    cocos2d::ccColor4B m_textReleaseColor;
-
-    LevelSettings m_settingClassic;
-    LevelSettings m_settingPlatformer;
-protected:
-    RGBASettingListener m_backgroundPressListener;
-    RGBASettingListener m_backgroundReleaseListener;
-    RGBASettingListener m_outlinePressListener;
-    RGBASettingListener m_outlineReleaseListener;
-    RGBASettingListener m_textPressListener;
-    RGBASettingListener m_textReleaseListener;
-};
-
-GEODE_NS_IV_END
-```
-
-### Update `src/class/IVManager.cpp`:
-
-```c++
-#include "IVManager.hpp"
-#include "../IVEvent.hpp"
-
-#pragma GCC diagnostic ignored "-Wreorder-ctor"
-
-using namespace geode::prelude;
-
-#define GEODE_IV_CONSTRUCT_COLOR(__col) \
-    m_##__col##PressColor(Mod::get()->getSettingValue<ccColor4B>(#__col "-press-color")), \
-    m_##__col##ReleaseColor(Mod::get()->getSettingValue<ccColor4B>(#__col "-release-color")), \
-    m_##__col##PressListener( \
-        [this](ccColor4B value) {\
-            m_##__col##PressColor = value;\
-            IVSettingEvent(SettingEventType::Color).post();\
-        }, \
-        geode::SettingChangedFilterV3<cocos2d::ccColor4B>(Mod::get()->getID(), #__col "-press-color") \
-    ), \
-    m_##__col##ReleaseListener( \
-        [this](ccColor4B value) {\
-            m_##__col##ReleaseColor = value;\
-            IVSettingEvent(SettingEventType::Color).post();\
-        }, \
-        geode::SettingChangedFilterV3<cocos2d::ccColor4B>(Mod::get()->getID(), #__col "-release-color") \
-    ) \
-
-// ... rest of file remains the same
-```
-
-## Key Changes:
-- `IVSettingEvent` now inherits from `geode::GlobalEvent` with the correct template parameters
-- Removed custom `IVSettingFilter` class; use `geode::EventFilter<IVSettingEvent>` directly
-- Made the filter type alias explicit in the macro to avoid template resolution issues
-- Added the missing include for `IVEvent.hpp` in the manager header
